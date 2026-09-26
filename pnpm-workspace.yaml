@@ -1,0 +1,9 @@
+# Dependencies whose install scripts are allowed to run (native bindings).
+# pnpm blocks postinstall scripts by default; these are required by Tailwind v4
+# (@tailwindcss/oxide), Next.js image optimization (sharp), and ESLint module
+# resolution (unrs-resolver). These are devDependencies, so they are not a
+# supply-chain concern.
+allowBuilds:
+  '@tailwindcss/oxide': true
+  sharp: true
+  unrs-resolver: true

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs the project's lint + typecheck checks before every commit.
+# Activated by the "prepare" script, which sets core.hooksPath=.githooks.
+set -e
+
+echo "pre-commit: running pnpm check"
+pnpm check
