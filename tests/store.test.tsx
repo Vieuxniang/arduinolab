@@ -374,3 +374,191 @@ describe("lab store", () => {
     })
   })
 })
+
+describe("lab store edge cases", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.sdk = null
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("keeps defaults when restoring the saved state fails", async () => {
+    mocks.sdk = makeSdk(() => Promise.reject(new Error("network down"))).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    expect(result.current.xp).toBe(0)
+    expect(result.current.lab).toBe(STARTING_LAB)
+    expect(result.current.completed).toEqual([])
+    expect(result.current.lang).toBe("fr")
+  })
+
+  it("keeps defaults when there is no saved record yet", async () => {
+    mocks.sdk = makeSdk(() => Promise.resolve(null)).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    expect(result.current.xp).toBe(0)
+    expect(result.current.lab).toBe(STARTING_LAB)
+    expect(result.current.completed).toEqual([])
+  })
+
+  it("ignores non-finite xp and lab values from the saved blob", async () => {
+    const record: UserStateRecord = {
+      blob: { xp: Number.NaN, lab: Number.POSITIVE_INFINITY },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    }
+    mocks.sdk = makeSdk(() => Promise.resolve(record)).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    expect(result.current.xp).toBe(0)
+    expect(result.current.lab).toBe(STARTING_LAB)
+  })
+
+  it("caps restored missions at 45 entries and drops out-of-range ids", async () => {
+    const record: UserStateRecord = {
+      blob: { completed: Array.from({ length: 50 }, (_, i) => i) },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    }
+    mocks.sdk = makeSdk(() => Promise.resolve(record)).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    // 46 valid ids (0..45) survive the range filter, then the list is cut to 45.
+    expect(result.current.completed).toEqual(
+      Array.from({ length: 45 }, (_, i) => i),
+    )
+  })
+
+  it("stays at LPI1 just below the 300 xp boundary", async () => {
+    const record: UserStateRecord = {
+      blob: { xp: 299 },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    }
+    mocks.sdk = makeSdk(() => Promise.resolve(record)).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    expect(result.current.level).toBe(1)
+    expect(result.current.userLevel).toBe("LPI1")
+  })
+
+  it("reaches LPI2 exactly at 300 xp", async () => {
+    const record: UserStateRecord = {
+      blob: { xp: 300 },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    }
+    mocks.sdk = makeSdk(() => Promise.resolve(record)).sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+
+    expect(result.current.level).toBe(2)
+    expect(result.current.userLevel).toBe("LPI2")
+  })
+
+  it("exposes the device uid to consumers", () => {
+    const { result } = renderHook(() => useLab(), { wrapper })
+
+    expect(result.current.uid).toBe("test-uid")
+  })
+
+  it("steps the combo multiplier up a tier at 6 missions", () => {
+    const { result } = renderHook(() => useLab(), { wrapper })
+
+    act(() => {
+      result.current.updateCombo(6)
+    })
+
+    expect(result.current.combo).toMatchObject({
+      count: 6,
+      multiplier: 2,
+      active: true,
+    })
+  })
+
+  it("writes sanitized values when saving after the balance goes negative", async () => {
+    vi.useFakeTimers()
+    const { sdk, set } = makeSdk()
+    mocks.sdk = sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await act(async () => {})
+
+    act(() => {
+      result.current.addLab(-150)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(1200)
+    })
+
+    expect(set).toHaveBeenCalledTimes(1)
+    expect(set).toHaveBeenCalledWith(
+      "arduinolab.progress",
+      expect.objectContaining({ xp: 0, lab: 0, completed: [] }),
+    )
+  })
+
+  it("keeps in-memory progress when a save fails", async () => {
+    vi.useFakeTimers()
+    const m = mission(1)
+    const { sdk, set } = makeSdk()
+    set.mockImplementation(() => Promise.reject(new Error("offline")))
+    mocks.sdk = sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await act(async () => {})
+
+    act(() => {
+      result.current.completeMission(m.id)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(1200)
+    })
+
+    expect(set).toHaveBeenCalledTimes(1)
+    // The failed save must not roll back or corrupt local progress.
+    expect(result.current.completed).toEqual([m.id])
+    expect(result.current.lab).toBe(STARTING_LAB + Math.round(m.cost * 1.5))
+  })
+
+  it("coalesces rapid changes into a single save with the latest values", async () => {
+    vi.useFakeTimers()
+    const m = mission(1)
+    const { sdk, set } = makeSdk()
+    mocks.sdk = sdk
+
+    const { result } = renderHook(() => useLab(), { wrapper })
+    await act(async () => {})
+
+    act(() => {
+      result.current.completeMission(m.id)
+      result.current.addLab(10)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(1200)
+    })
+
+    expect(set).toHaveBeenCalledTimes(1)
+    expect(set).toHaveBeenCalledWith("arduinolab.progress", {
+      lang: "fr",
+      xp: m.xp,
+      lab: STARTING_LAB + Math.round(m.cost * 1.5) + 10,
+      completed: [m.id],
+      langChosen: false,
+    })
+  })
+})
